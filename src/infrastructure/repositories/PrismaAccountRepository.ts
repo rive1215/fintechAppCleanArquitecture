@@ -1,4 +1,4 @@
-import { PrismaClient } from '../../generated/prisma/client';
+import { Prisma, PrismaClient } from '../../generated/prisma/client';
 import { AccountRepository } from '../../domain/repositories/Repositories';
 import { Account } from '../../domain/entities/Account';
 import { Deposit, Transfer, Transaction, Withdrawal } from '../../domain/entities/Transaction';
@@ -6,19 +6,16 @@ import { AccountMapper } from '../mappers/AccountMapper';
 import { TransactionMapper } from '../mappers/TransactionMapper';
 
 export class PrismaAccountRepository implements AccountRepository {
-  // Inyección de dependencias a través del constructor
   constructor(private readonly prisma: PrismaClient) { }
 
   async save(account: Account): Promise<Account> {
     const data = AccountMapper.toPersistence(account);
 
-    // Sin id: alta nueva (la DB genera el UUID)
     if (account.id === undefined) {
       const created = await this.prisma.account.create({ data });
       return AccountMapper.toDomain(created);
     }
 
-    // Con id: upsert (insertar si no existe, actualizar si ya existe)
     const prismaAccount = await this.prisma.account.upsert({
       where: { id: account.id },
       update: {
@@ -60,80 +57,34 @@ export class PrismaAccountRepository implements AccountRepository {
   }
 
   /**
-   * Aplica la operación monetaria en dominio y persiste cuentas + transacción de forma atómica.
+   * Ejecuta Deposit / Withdrawal / Transfer de forma atómica con prisma.$transaction:
+   * actualiza saldos vía métodos de dominio y persiste el registro STI de Transaction.
+   * Si cualquier paso falla, Prisma hace rollback de toda la unidad de trabajo.
    */
   async executeTransaction(transaction: Transaction): Promise<Transaction> {
-    return this.prisma.$transaction(async (tx) => {
-      if (transaction instanceof Deposit) {
-        const prismaDestination = await tx.account.findUniqueOrThrow({
-          where: { id: transaction.destinationAccount },
-        });
-        const destination = AccountMapper.toDomain(prismaDestination);
-        destination.deposit(transaction.amount);
-        transaction.markAsCompleted();
+    return this.prisma.$transaction(
+      async (tx) => {
+        if (transaction instanceof Deposit) {
+          return this.executeDeposit(tx, transaction);
+        }
 
-        await tx.account.update({
-          where: { id: prismaDestination.id },
-          data: { balance: destination.balance },
-        });
+        if (transaction instanceof Withdrawal) {
+          return this.executeWithdrawal(tx, transaction);
+        }
 
-        const saved = await tx.transaction.create({
-          data: TransactionMapper.toPersistence(transaction),
-        });
-        return TransactionMapper.toDomain(saved);
-      }
+        if (transaction instanceof Transfer) {
+          return this.executeTransfer(tx, transaction);
+        }
 
-      if (transaction instanceof Withdrawal) {
-        const prismaSource = await tx.account.findUniqueOrThrow({
-          where: { id: transaction.sourceAccount },
-        });
-        const source = AccountMapper.toDomain(prismaSource);
-        source.withdraw(transaction.amount);
-        transaction.markAsCompleted();
-
-        await tx.account.update({
-          where: { id: prismaSource.id },
-          data: { balance: source.balance },
-        });
-
-        const saved = await tx.transaction.create({
-          data: TransactionMapper.toPersistence(transaction),
-        });
-        return TransactionMapper.toDomain(saved);
-      }
-
-      if (transaction instanceof Transfer) {
-        const prismaSource = await tx.account.findUniqueOrThrow({
-          where: { id: transaction.sourceAccount },
-        });
-        const prismaDestination = await tx.account.findUniqueOrThrow({
-          where: { id: transaction.destinationAccount },
-        });
-
-        const source = AccountMapper.toDomain(prismaSource);
-        const destination = AccountMapper.toDomain(prismaDestination);
-
-        source.withdraw(transaction.amount);
-        destination.deposit(transaction.amount);
-        transaction.markAsCompleted();
-
-        await tx.account.update({
-          where: { id: prismaSource.id },
-          data: { balance: source.balance },
-        });
-        await tx.account.update({
-          where: { id: prismaDestination.id },
-          data: { balance: destination.balance },
-        });
-
-        const saved = await tx.transaction.create({
-          data: TransactionMapper.toPersistence(transaction),
-        });
-        return TransactionMapper.toDomain(saved);
-      }
-
-      throw new Error("Instancia de transacción inválida para executeTransaction");
-    });
+        throw new Error("Instancia de transacción inválida para executeTransaction");
+      },
+      {
+        // Serializable reduce lecturas sucias/anomalías en operaciones monetarias concurrentes
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        maxWait: 5_000,
+        timeout: 10_000,
+      },
+    );
   }
 
   async freeze(account: Account): Promise<void> {
@@ -160,5 +111,87 @@ export class PrismaAccountRepository implements AccountRepository {
       where: { id: account.id },
       data: { status: account.status },
     });
+  }
+
+  private async executeDeposit(
+    tx: Prisma.TransactionClient,
+    transaction: Deposit,
+  ): Promise<Transaction> {
+    const prismaDestination = await tx.account.findUniqueOrThrow({
+      where: { id: transaction.destinationAccount },
+    });
+
+    const destination = AccountMapper.toDomain(prismaDestination);
+    destination.deposit(transaction.amount);
+    transaction.markAsCompleted();
+
+    await tx.account.update({
+      where: { id: prismaDestination.id },
+      data: { balance: destination.balance },
+    });
+
+    const saved = await tx.transaction.create({
+      data: TransactionMapper.toPersistence(transaction),
+    });
+
+    return TransactionMapper.toDomain(saved);
+  }
+
+  private async executeWithdrawal(
+    tx: Prisma.TransactionClient,
+    transaction: Withdrawal,
+  ): Promise<Transaction> {
+    const prismaSource = await tx.account.findUniqueOrThrow({
+      where: { id: transaction.sourceAccount },
+    });
+
+    const source = AccountMapper.toDomain(prismaSource);
+    source.withdraw(transaction.amount);
+    transaction.markAsCompleted();
+
+    await tx.account.update({
+      where: { id: prismaSource.id },
+      data: { balance: source.balance },
+    });
+
+    const saved = await tx.transaction.create({
+      data: TransactionMapper.toPersistence(transaction),
+    });
+
+    return TransactionMapper.toDomain(saved);
+  }
+
+  private async executeTransfer(
+    tx: Prisma.TransactionClient,
+    transaction: Transfer,
+  ): Promise<Transaction> {
+    const prismaSource = await tx.account.findUniqueOrThrow({
+      where: { id: transaction.sourceAccount },
+    });
+    const prismaDestination = await tx.account.findUniqueOrThrow({
+      where: { id: transaction.destinationAccount },
+    });
+
+    const source = AccountMapper.toDomain(prismaSource);
+    const destination = AccountMapper.toDomain(prismaDestination);
+
+    source.withdraw(transaction.amount);
+    destination.deposit(transaction.amount);
+    transaction.markAsCompleted();
+
+    await tx.account.update({
+      where: { id: prismaSource.id },
+      data: { balance: source.balance },
+    });
+    await tx.account.update({
+      where: { id: prismaDestination.id },
+      data: { balance: destination.balance },
+    });
+
+    const saved = await tx.transaction.create({
+      data: TransactionMapper.toPersistence(transaction),
+    });
+
+    return TransactionMapper.toDomain(saved);
   }
 }

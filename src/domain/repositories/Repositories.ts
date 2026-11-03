@@ -1,7 +1,6 @@
 import { Account } from "../entities/Account";
 import { Transaction } from "../entities/Transaction";
 import { User } from "../entities/User";
-import { Decimal } from "decimal.js";
 
 export interface UserRepository {
   save(user: User): Promise<User>;
@@ -15,6 +14,10 @@ export interface AccountRepository {
   findByUserId(userId: string): Promise<Account[]>;
   save(account: Account): Promise<Account>;
 
+  /**
+   * Ejecuta de forma atómica cualquier transacción financiera (TRANSFER, DEPOSIT, WITHDRAWAL)
+   * actualizando saldos y persistiendo la entidad de dominio Transaction.
+   */
   executeTransaction(transaction: Transaction): Promise<Transaction>;
   freeze(account: Account): Promise<void>;
   unfreeze(account: Account): Promise<void>;
