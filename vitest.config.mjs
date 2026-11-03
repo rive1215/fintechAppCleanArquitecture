@@ -10,10 +10,16 @@ export default defineConfig({
     environment: 'node',
     clearMocks: true,
     include: ['tests/**/*.test.ts', 'tests/**/*.spec.ts'],
+    // Las integraciones tocan la misma DB: evitar carreras entre archivos
+    fileParallelism: false,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
-      include: ['src/use-cases/**/*.ts', 'src/domain/**/*.ts'],
+      include: [
+        'src/use-cases/**/*.ts',
+        'src/domain/**/*.ts',
+        'src/infrastructure/repositories/**/*.ts',
+      ],
       exclude: ['src/**/*.d.ts'],
     },
   },
