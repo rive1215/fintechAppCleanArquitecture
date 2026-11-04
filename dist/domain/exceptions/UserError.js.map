@@ -1,0 +1,1 @@
+{"version":3,"file":"UserError.js","sourceRoot":"","sources":["../../../src/domain/exceptions/UserError.ts"],"names":[],"mappings":";;;AAAA,+CAA4C;AAE5C,4BAAoC,SAAQ,yBAAW;IACrD,YAAY,KAAa;QACvB,KAAK,CAAC,4BAA4B,KAAK,aAAa,CAAC,CAAC;IACxD,CAAC;CACF;;AAED,6BAAqC,SAAQ,yBAAW;IACtD,YAAY,OAAO,GAAW,yBAAyB;QACrD,KAAK,CAAC,OAAO,CAAC,CAAC;IACjB,CAAC;CACF"}
